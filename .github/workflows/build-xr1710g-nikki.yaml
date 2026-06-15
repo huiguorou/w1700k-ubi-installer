@@ -38,16 +38,19 @@ jobs:
           path: openwrt
           fetch-depth: 0
 
-      - name: Fix incompatible Airoha kernel patch
+      - name: Fix incompatible Airoha kernel patches
         run: |
           cd openwrt
 
-          echo "===> Disable incompatible Airoha patch for Linux 6.18.21"
+          echo "===> Disable incompatible Airoha TX/QDMA patches for Linux 6.18.21"
+
           rm -f target/linux/airoha/patches-6.18/611-net-airoha-Fix-possible-TX-queue-stall-in-airoha_qdma_tx_napi_poll.patch
+          rm -f target/linux/airoha/patches-6.18/612-net-airoha-Add-missing-bits-in-airoha_qdma_cleanup_tx_queue.patch
 
           echo "===> Clean possible stale kernel build state"
           rm -rf build_dir/target-*/linux-airoha_an7581/linux-6.18.21 || true
           rm -rf build_dir/target-*/linux-airoha_an7581 || true
+          rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp/.target_compile || true
 
           echo "===> Remaining Airoha 6.18 patches:"
           ls -1 target/linux/airoha/patches-6.18 || true
@@ -69,17 +72,36 @@ jobs:
           echo "===> Update feeds"
           ./scripts/feeds update -a
 
-          echo "===> Remove unrelated broken feed packages before feed install"
-          rm -rf package/feeds/packages/nfs-kernel-server || true
-          rm -rf package/feeds/video/sdl3 || true
-
           echo "===> Install feeds"
           ./scripts/feeds install -a
           ./scripts/feeds install -p nikki -a
 
-          echo "===> Remove unrelated broken feed packages after feed install"
+          echo "===> Remove unrelated broken NFS/video feed packages"
           rm -rf package/feeds/packages/nfs-kernel-server || true
+          rm -rf feeds/packages/nfs-kernel-server || true
+
+          rm -rf package/feeds/video/sdl2-compat || true
           rm -rf package/feeds/video/sdl3 || true
+          rm -rf package/feeds/video/sdl3-doom || true
+          rm -rf package/feeds/video/sdl3-image || true
+          rm -rf package/feeds/video/sdl3-mixer || true
+
+          rm -rf feeds/video/sdl2-compat || true
+          rm -rf feeds/video/sdl3 || true
+          rm -rf feeds/video/sdl3-doom || true
+          rm -rf feeds/video/sdl3-image || true
+          rm -rf feeds/video/sdl3-mixer || true
+
+          echo "===> Fix Nikki Mihomo recursive dependency"
+          echo "===> Keep mihomo-meta, remove mihomo-alpha"
+          rm -rf package/feeds/nikki/mihomo-alpha || true
+          rm -rf feeds/nikki/mihomo-alpha || true
+
+          echo "===> Clean generated Kconfig cache"
+          rm -rf tmp
+
+          echo "===> Verify remaining Nikki packages"
+          find package/feeds/nikki -maxdepth 2 -type f -name Makefile | sort || true
 
       - name: Check XR1710G device support
         run: |
@@ -130,7 +152,7 @@ jobs:
           grep -E "CONFIG_TARGET_(airoha|DEVICE_airoha_an7581_DEVICE_gemtek_xr1710g)" .config || true
 
           echo "===> Check Nikki related config"
-          grep -E "CONFIG_PACKAGE_(nikki|luci-app-nikki|luci-i18n-nikki|kmod-tun|kmod-dummy|kmod-nft-tproxy|kmod-nft-socket|kmod-inet-diag|ip-full|yq|curl|ca-bundle|firewall4)" .config || true
+          grep -E "CONFIG_PACKAGE_(nikki|luci-app-nikki|luci-i18n-nikki|mihomo-meta|mihomo-alpha|kmod-tun|kmod-dummy|kmod-nft-tproxy|kmod-nft-socket|kmod-inet-diag|ip-full|yq|curl|ca-bundle|firewall4)" .config || true
 
           echo "===> Check LAN IP customization"
           cat files/etc/uci-defaults/99-set-default-lan-ip
