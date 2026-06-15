@@ -1,0 +1,107 @@
+name: XR1710G UBI OpenWrt with Nikki
+
+on:
+  workflow_dispatch:
+
+env:
+  REMOTE_REPOSITORY: hurrian/openwrt-w1700k
+  REMOTE_BRANCH: xr1710g-safe
+  TARGET_SUBTARGET: airoha/an7581
+  INNER_CONFIG: configs/xr1710g-nikki.config
+  OUTER_CONFIG: configs/minimal.config
+
+jobs:
+  build:
+    name: Build OpenWrt XR1710G with Nikki
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout installer repository
+        uses: actions/checkout@v4
+        with:
+          path: installer-repo
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3 python3-distutils python3-setuptools python3-pyelftools \
+            rsync swig unzip zlib1g-dev file wget curl jq time
+
+      - name: Checkout OpenWrt repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REMOTE_REPOSITORY }}
+          ref: ${{ env.REMOTE_BRANCH }}
+          path: openwrt
+          fetch-depth: 0
+
+      - name: Add Nikki feed and install feeds
+        run: |
+          cd openwrt
+
+          sed -i \
+            -e 's#https://git.openwrt.org/feed/#https://github.com/openwrt/#g' \
+            -e 's#https://git.openwrt.org/project/#https://github.com/openwrt/#g' \
+            feeds.conf.default
+
+          grep -q "OpenWrt-nikki" feeds.conf.default || \
+            echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> feeds.conf.default
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds install -p nikki -a
+
+      - name: Inner Build - XR1710G sysupgrade and recovery
+        run: |
+          cd openwrt
+
+          cp "../installer-repo/${{ env.INNER_CONFIG }}" .config
+
+          make defconfig
+
+          echo "===== Nikki config check ====="
+          grep -E "CONFIG_PACKAGE_(nikki|luci-app-nikki|luci-i18n-nikki|kmod-tun|kmod-dummy|kmod-nft-tproxy|kmod-nft-socket|kmod-inet-diag|ip-full|yq|curl|ca-bundle)" .config || true
+
+          make -j"$(nproc)" download V=s
+          make -j"$(nproc)" world V=s
+
+      - name: Outer Build - UBI Installer
+        run: |
+          cd openwrt
+
+          cp "../installer-repo/${{ env.OUTER_CONFIG }}" .config
+          make defconfig
+
+          mkdir -p files/installer
+
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" "files/installer/"
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" "files/installer/"
+
+          rsync -a ../installer-repo/files/ files/
+
+          chmod +x files/installer/install.sh
+          chmod +x files/lib/preinit/00_installer || true
+
+          make -j"$(nproc)" V=s
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p output/
+
+          cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-installer.itb"
+
+          cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb" \
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb"
+
+          cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr1710g-openwrt-nikki-installer
+          path: output/
