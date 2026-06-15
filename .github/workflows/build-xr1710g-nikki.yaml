@@ -38,6 +38,20 @@ jobs:
           path: openwrt
           fetch-depth: 0
 
+      - name: Fix incompatible Airoha kernel patch
+        run: |
+          cd openwrt
+
+          echo "===> Disable incompatible Airoha patch for Linux 6.18.21"
+          rm -f target/linux/airoha/patches-6.18/611-net-airoha-Fix-possible-TX-queue-stall-in-airoha_qdma_tx_napi_poll.patch
+
+          echo "===> Clean possible stale kernel build state"
+          rm -rf build_dir/target-*/linux-airoha_an7581/linux-6.18.21 || true
+          rm -rf build_dir/target-*/linux-airoha_an7581 || true
+
+          echo "===> Remaining Airoha 6.18 patches:"
+          ls -1 target/linux/airoha/patches-6.18 || true
+
       - name: Add Nikki feed and install feeds
         run: |
           cd openwrt
@@ -52,10 +66,30 @@ jobs:
           grep -q "OpenWrt-nikki" feeds.conf.default || \
             echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> feeds.conf.default
 
-          echo "===> Update and install feeds"
+          echo "===> Update feeds"
           ./scripts/feeds update -a
+
+          echo "===> Remove unrelated broken feed packages before feed install"
+          rm -rf package/feeds/packages/nfs-kernel-server || true
+          rm -rf package/feeds/video/sdl3 || true
+
+          echo "===> Install feeds"
           ./scripts/feeds install -a
           ./scripts/feeds install -p nikki -a
+
+          echo "===> Remove unrelated broken feed packages after feed install"
+          rm -rf package/feeds/packages/nfs-kernel-server || true
+          rm -rf package/feeds/video/sdl3 || true
+
+      - name: Check XR1710G device support
+        run: |
+          cd openwrt
+
+          echo "===> Search XR1710G device profile"
+          grep -R "gemtek_xr1710g" -n target/linux package/boot 2>/dev/null || true
+
+          echo "===> Search XR1710G related files"
+          find target/linux -iname "*xr1710g*" -o -iname "*17xx*" -o -iname "*w1700k*" | sort || true
 
       - name: Inner Build - XR1710G firmware with Nikki
         run: |
@@ -86,6 +120,7 @@ jobs:
           exit 0
           EOF
 
+          sed -i 's/^[[:space:]]*//' files/etc/uci-defaults/99-set-default-lan-ip
           chmod +x files/etc/uci-defaults/99-set-default-lan-ip
 
           echo "===> Expand config"
@@ -103,12 +138,27 @@ jobs:
           echo "===> Download sources"
           make -j"$(nproc)" download V=s
 
-          echo "===> Build firmware"
+          echo "===> Build inner firmware with Nikki"
           make -j"$(nproc)" world V=s
+
+          echo "===> Save inner Nikki artifacts before outer minimal build"
+          mkdir -p ../inner-artifacts
+
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
+             "../inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb"
+
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
+             "../inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb"
+
+          echo "===> Inner artifacts saved"
+          ls -lh ../inner-artifacts
 
       - name: Outer Build - UBI installer
         run: |
           cd openwrt
+
+          echo "===> Clean inner-only first boot customization before outer installer build"
+          rm -rf files/etc/uci-defaults/99-set-default-lan-ip || true
 
           echo "===> Load outer minimal config"
           cp "../installer-repo/${{ env.OUTER_CONFIG }}" .config
@@ -117,10 +167,10 @@ jobs:
           echo "===> Prepare installer files"
           mkdir -p files/installer
 
-          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
+          cp "../inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
              "files/installer/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb"
 
-          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
+          cp "../inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb" \
              "files/installer/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb"
 
           rsync -a ../installer-repo/files/ files/
@@ -128,23 +178,28 @@ jobs:
           chmod +x files/installer/install.sh || true
           chmod +x files/lib/preinit/00_installer || true
 
-          echo "===> Build installer"
+          echo "===> Build outer installer"
           make -j"$(nproc)" V=s
 
       - name: Prepare artifacts
         run: |
           mkdir -p output
 
-          echo "===> Collect build artifacts"
-
+          echo "===> Collect installer initramfs"
           cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
              "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-installer.itb" || true
 
+          echo "===> Collect chainload uboot"
           cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb" \
              "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb" || true
 
-          cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
+          echo "===> Collect Nikki sysupgrade from inner artifacts"
+          cp "inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb" \
              "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb" || true
+
+          echo "===> Collect Nikki recovery from inner artifacts"
+          cp "inner-artifacts/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery-with-nikki.itb" || true
 
           echo "===> List output"
           find output -maxdepth 1 -type f -print -exec ls -lh {} \;
