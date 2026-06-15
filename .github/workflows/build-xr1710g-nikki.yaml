@@ -12,7 +12,7 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt XR1710G with Nikki
+    name: Build XR1710G OpenWrt with Nikki
     runs-on: ubuntu-24.04
 
     steps:
@@ -26,8 +26,8 @@ jobs:
           sudo apt update
           sudo apt install -y \
             build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3 python3-distutils python3-setuptools python3-pyelftools \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3 python3-dev python3-setuptools python3-venv python3-pyelftools \
             rsync swig unzip zlib1g-dev file wget curl jq time
 
       - name: Checkout OpenWrt repository
@@ -42,66 +42,115 @@ jobs:
         run: |
           cd openwrt
 
+          echo "===> Fix OpenWrt feed mirrors"
           sed -i \
             -e 's#https://git.openwrt.org/feed/#https://github.com/openwrt/#g' \
             -e 's#https://git.openwrt.org/project/#https://github.com/openwrt/#g' \
             feeds.conf.default
 
+          echo "===> Add Nikki feed"
           grep -q "OpenWrt-nikki" feeds.conf.default || \
             echo "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main" >> feeds.conf.default
 
+          echo "===> Update and install feeds"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds install -p nikki -a
 
-      - name: Inner Build - XR1710G sysupgrade and recovery
+      - name: Inner Build - XR1710G firmware with Nikki
         run: |
           cd openwrt
 
+          echo "===> Load inner build config"
           cp "../installer-repo/${{ env.INNER_CONFIG }}" .config
 
+          echo "===> Inject default LAN IP: 192.168.10.1"
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/99-set-default-lan-ip <<'EOF'
+          #!/bin/sh
+
+          # Set default LAN IP to avoid conflict with common 192.168.1.1 networks.
+          # This script runs once on first boot, then OpenWrt removes it automatically.
+
+          uci batch <<'UCI'
+          set network.lan.ipaddr='192.168.10.1'
+          set network.lan.netmask='255.255.255.0'
+          set dhcp.lan.start='100'
+          set dhcp.lan.limit='150'
+          set dhcp.lan.leasetime='12h'
+          commit network
+          commit dhcp
+          UCI
+
+          exit 0
+          EOF
+
+          chmod +x files/etc/uci-defaults/99-set-default-lan-ip
+
+          echo "===> Expand config"
           make defconfig
 
-          echo "===== Nikki config check ====="
-          grep -E "CONFIG_PACKAGE_(nikki|luci-app-nikki|luci-i18n-nikki|kmod-tun|kmod-dummy|kmod-nft-tproxy|kmod-nft-socket|kmod-inet-diag|ip-full|yq|curl|ca-bundle)" .config || true
+          echo "===> Check target config"
+          grep -E "CONFIG_TARGET_(airoha|DEVICE_airoha_an7581_DEVICE_gemtek_xr1710g)" .config || true
 
+          echo "===> Check Nikki related config"
+          grep -E "CONFIG_PACKAGE_(nikki|luci-app-nikki|luci-i18n-nikki|kmod-tun|kmod-dummy|kmod-nft-tproxy|kmod-nft-socket|kmod-inet-diag|ip-full|yq|curl|ca-bundle|firewall4)" .config || true
+
+          echo "===> Check LAN IP customization"
+          cat files/etc/uci-defaults/99-set-default-lan-ip
+
+          echo "===> Download sources"
           make -j"$(nproc)" download V=s
+
+          echo "===> Build firmware"
           make -j"$(nproc)" world V=s
 
-      - name: Outer Build - UBI Installer
+      - name: Outer Build - UBI installer
         run: |
           cd openwrt
 
+          echo "===> Load outer minimal config"
           cp "../installer-repo/${{ env.OUTER_CONFIG }}" .config
           make defconfig
 
+          echo "===> Prepare installer files"
           mkdir -p files/installer
 
-          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" "files/installer/"
-          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" "files/installer/"
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
+             "files/installer/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb"
+
+          cp "bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
+             "files/installer/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb"
 
           rsync -a ../installer-repo/files/ files/
 
-          chmod +x files/installer/install.sh
+          chmod +x files/installer/install.sh || true
           chmod +x files/lib/preinit/00_installer || true
 
+          echo "===> Build installer"
           make -j"$(nproc)" V=s
 
       - name: Prepare artifacts
         run: |
-          mkdir -p output/
+          mkdir -p output
+
+          echo "===> Collect build artifacts"
 
           cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-recovery.itb" \
-             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-installer.itb"
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-initramfs-installer.itb" || true
 
           cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb" \
-             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb"
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-chainload-uboot.itb" || true
 
           cp "openwrt/bin/targets/${{ env.TARGET_SUBTARGET }}/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade.itb" \
-             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb"
+             "output/openwrt-airoha-an7581-gemtek_xr1710g-ubi-squashfs-sysupgrade-with-nikki.itb" || true
+
+          echo "===> List output"
+          find output -maxdepth 1 -type f -print -exec ls -lh {} \;
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xr1710g-openwrt-nikki-installer
+          name: xr1710g-openwrt-nikki
           path: output/
